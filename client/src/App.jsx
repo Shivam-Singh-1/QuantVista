@@ -6,6 +6,8 @@ import StockCard from "./components/StockData";
 import AlertsPanel from "./components/AlertsPanel";
 import AlertToasts from "./components/AlertToasts";
 import AuthPage from "./components/AuthPage";
+import WatchlistsPanel from "./components/WatchlistsPanel";
+import PortfolioPanel from "./components/PortfolioPanel";
 import {
   Moon,
   Sun,
@@ -62,6 +64,19 @@ function App() {
   const [theme, setTheme] = useState(initialTheme);
   const [alerts, setAlerts] = useState([]);
   const [alertHistory, setAlertHistory] = useState([]);
+  const [watchlists, setWatchlists] = useState([]);
+  const [selectedWatchlistId, setSelectedWatchlistId] = useState("");
+  const [portfolioSummary, setPortfolioSummary] = useState({
+    totals: {
+      marketValue: 0,
+      unrealizedPnl: 0,
+      realizedPnl: 0,
+      positions: 0,
+      transactions: 0,
+    },
+    positions: [],
+  });
+  const [portfolioTransactions, setPortfolioTransactions] = useState([]);
   const [toasts, setToasts] = useState([]);
   const [isDataStale, setIsDataStale] = useState(false);
   const [pollingMeta, setPollingMeta] = useState({
@@ -177,6 +192,34 @@ function App() {
     }
   };
 
+  const fetchWatchlists = async () => {
+    if (!authToken) return;
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/watchlists`, {
+        headers: getAuthHeaders(),
+      });
+
+      if (response.status === 401) {
+        throw new Error("Session expired. Please log in again.");
+      }
+
+      const data = await response.json();
+      const normalized = Array.isArray(data) ? data : [];
+      setWatchlists(normalized);
+
+      if (!normalized.some((item) => item.id === selectedWatchlistId)) {
+        setSelectedWatchlistId(normalized[0]?.id || "");
+      }
+    } catch (error) {
+      console.error("Failed to fetch watchlists:", error);
+      if (error.message.includes("Session expired")) {
+        setAuthToken("");
+        setAuthUser(null);
+      }
+    }
+  };
+
   const fetchHealth = async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/health`);
@@ -188,6 +231,55 @@ function App() {
       });
     } catch (error) {
       console.error("Health fetch failed:", error);
+    }
+  };
+
+  const fetchPortfolio = async () => {
+    if (!authToken) return;
+
+    try {
+      const [summaryResponse, transactionsResponse] = await Promise.all([
+        fetch(`${API_BASE_URL}/api/portfolio/summary`, {
+          headers: getAuthHeaders(),
+        }),
+        fetch(`${API_BASE_URL}/api/portfolio/transactions?limit=50`, {
+          headers: getAuthHeaders(),
+        }),
+      ]);
+
+      if (
+        summaryResponse.status === 401 ||
+        transactionsResponse.status === 401
+      ) {
+        throw new Error("Session expired. Please log in again.");
+      }
+
+      const summaryData = await summaryResponse.json();
+      const transactionsData = await transactionsResponse.json();
+
+      setPortfolioSummary(
+        summaryData && typeof summaryData === "object"
+          ? summaryData
+          : {
+              totals: {
+                marketValue: 0,
+                unrealizedPnl: 0,
+                realizedPnl: 0,
+                positions: 0,
+                transactions: 0,
+              },
+              positions: [],
+            },
+      );
+      setPortfolioTransactions(
+        Array.isArray(transactionsData) ? transactionsData : [],
+      );
+    } catch (error) {
+      console.error("Failed to fetch portfolio:", error);
+      if (error.message.includes("Session expired")) {
+        setAuthToken("");
+        setAuthUser(null);
+      }
     }
   };
 
@@ -288,6 +380,19 @@ function App() {
       setHistoricalData([]);
       setAlerts([]);
       setAlertHistory([]);
+      setWatchlists([]);
+      setSelectedWatchlistId("");
+      setPortfolioTransactions([]);
+      setPortfolioSummary({
+        totals: {
+          marketValue: 0,
+          unrealizedPnl: 0,
+          realizedPnl: 0,
+          positions: 0,
+          transactions: 0,
+        },
+        positions: [],
+      });
       historyCacheRef.current.clear();
     }
   }, [authToken]);
@@ -358,6 +463,8 @@ function App() {
     fetchStocks();
     fetchAlerts();
     fetchAlertHistory();
+    fetchWatchlists();
+    fetchPortfolio();
     fetchHealth();
 
     return () => {
@@ -483,10 +590,293 @@ function App() {
     }
   };
 
+  const createWatchlist = async (name) => {
+    if (!authToken) return;
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/watchlists`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        body: JSON.stringify({ name }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Unable to create watchlist");
+      }
+
+      const created = await response.json();
+      setWatchlists((prev) => [created, ...prev]);
+      setSelectedWatchlistId(created.id);
+      addToast("Watchlist created", created.name, "success");
+    } catch (error) {
+      addToast("Create failed", error.message, "error");
+    }
+  };
+
+  const deleteWatchlist = async (watchlistId) => {
+    if (!authToken) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/watchlists/${watchlistId}`,
+        {
+          method: "DELETE",
+          headers: getAuthHeaders(),
+        },
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Unable to delete watchlist");
+      }
+
+      setWatchlists((prev) => {
+        const next = prev.filter((item) => item.id !== watchlistId);
+        if (!next.some((item) => item.id === selectedWatchlistId)) {
+          setSelectedWatchlistId(next[0]?.id || "");
+        }
+        return next;
+      });
+      addToast("Watchlist deleted", "List removed successfully", "info");
+    } catch (error) {
+      addToast("Delete failed", error.message, "error");
+    }
+  };
+
+  const renameWatchlist = async (watchlistId, name) => {
+    if (!authToken || !watchlistId) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/watchlists/${watchlistId}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+          body: JSON.stringify({ name }),
+        },
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Unable to rename watchlist");
+      }
+
+      const updated = await response.json();
+      setWatchlists((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      addToast("Watchlist renamed", updated.name, "success");
+    } catch (error) {
+      addToast("Rename failed", error.message, "error");
+    }
+  };
+
+  const addSymbolToWatchlist = async (watchlistId, symbol) => {
+    if (!authToken || !watchlistId || !symbol) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/watchlists/${watchlistId}/symbols`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+          body: JSON.stringify({ symbol }),
+        },
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Unable to add symbol");
+      }
+
+      const updated = await response.json();
+      setWatchlists((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      addToast("Added to watchlist", symbol, "success");
+    } catch (error) {
+      addToast("Add failed", error.message, "error");
+    }
+  };
+
+  const removeSymbolFromWatchlist = async (watchlistId, symbol) => {
+    if (!authToken || !watchlistId || !symbol) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/watchlists/${watchlistId}/symbols/${encodeURIComponent(symbol)}`,
+        {
+          method: "DELETE",
+          headers: getAuthHeaders(),
+        },
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Unable to remove symbol");
+      }
+
+      const updated = await response.json();
+      setWatchlists((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      addToast("Removed", `${symbol} removed from watchlist`, "info");
+    } catch (error) {
+      addToast("Remove failed", error.message, "error");
+    }
+  };
+
+  const createWatchlistPreset = async (watchlistId, payload) => {
+    if (!authToken || !watchlistId) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/watchlists/${watchlistId}/presets`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+          body: JSON.stringify(payload),
+        },
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Unable to create preset");
+      }
+
+      const updated = await response.json();
+      setWatchlists((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      addToast("Preset added", payload.name, "success");
+    } catch (error) {
+      addToast("Preset failed", error.message, "error");
+    }
+  };
+
+  const deleteWatchlistPreset = async (watchlistId, presetId) => {
+    if (!authToken || !watchlistId || !presetId) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/watchlists/${watchlistId}/presets/${presetId}`,
+        {
+          method: "DELETE",
+          headers: getAuthHeaders(),
+        },
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Unable to delete preset");
+      }
+
+      const updated = await response.json();
+      setWatchlists((prev) =>
+        prev.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      addToast("Preset removed", "Template deleted", "info");
+    } catch (error) {
+      addToast("Delete failed", error.message, "error");
+    }
+  };
+
+  const applyWatchlistPreset = async (watchlistId, presetId) => {
+    if (!authToken || !watchlistId || !presetId) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/watchlists/${watchlistId}/presets/${presetId}/apply`,
+        {
+          method: "POST",
+          headers: getAuthHeaders(),
+        },
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Unable to apply preset");
+      }
+
+      const result = await response.json();
+      await fetchAlerts();
+      addToast(
+        "Preset applied",
+        `Created ${result.createdCount || 0} alerts`,
+        "success",
+      );
+    } catch (error) {
+      addToast("Apply failed", error.message, "error");
+    }
+  };
+
+  const createPortfolioTransaction = async (payload) => {
+    if (!authToken) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/portfolio/transactions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+          body: JSON.stringify(payload),
+        },
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Unable to add transaction");
+      }
+
+      await fetchPortfolio();
+      addToast(
+        "Transaction added",
+        `${payload.side} ${payload.symbol}`,
+        "success",
+      );
+    } catch (error) {
+      addToast("Portfolio failed", error.message, "error");
+    }
+  };
+
+  const deletePortfolioTransaction = async (transactionId) => {
+    if (!authToken || !transactionId) return;
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/portfolio/transactions/${transactionId}`,
+        {
+          method: "DELETE",
+          headers: getAuthHeaders(),
+        },
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || "Unable to delete transaction");
+      }
+
+      await fetchPortfolio();
+      addToast("Transaction removed", "Portfolio recalculated", "info");
+    } catch (error) {
+      addToast("Delete failed", error.message, "error");
+    }
+  };
+
   const themeButtonLabel = useMemo(
     () =>
       theme === "dark" ? "Switch to creamy light" : "Switch to off-black dark",
     [theme],
+  );
+
+  const stocksBySymbol = useMemo(
+    () =>
+      stocks.reduce((acc, stock) => {
+        acc[stock.symbol] = stock.name;
+        return acc;
+      }, {}),
+    [stocks],
   );
 
   const handleAuthSuccess = ({ token, user }) => {
@@ -639,6 +1029,36 @@ function App() {
             stocks={stocks}
             selectedStock={selectedStock}
             onStockChange={handleStockChange}
+          />
+        </div>
+
+        <div className="mb-6 fade-in-up" style={{ animationDelay: "120ms" }}>
+          <WatchlistsPanel
+            watchlists={watchlists}
+            selectedWatchlistId={selectedWatchlistId}
+            selectedStock={selectedStock}
+            stocksBySymbol={stocksBySymbol}
+            onSelectWatchlist={setSelectedWatchlistId}
+            onCreateWatchlist={createWatchlist}
+            onRenameWatchlist={renameWatchlist}
+            onDeleteWatchlist={deleteWatchlist}
+            onAddSymbol={addSymbolToWatchlist}
+            onRemoveSymbol={removeSymbolFromWatchlist}
+            onSelectSymbol={handleStockChange}
+            onCreatePreset={createWatchlistPreset}
+            onDeletePreset={deleteWatchlistPreset}
+            onApplyPreset={applyWatchlistPreset}
+          />
+        </div>
+
+        <div className="mb-6 fade-in-up" style={{ animationDelay: "140ms" }}>
+          <PortfolioPanel
+            stocks={stocks}
+            selectedStock={selectedStock}
+            summary={portfolioSummary}
+            transactions={portfolioTransactions}
+            onCreateTransaction={createPortfolioTransaction}
+            onDeleteTransaction={deletePortfolioTransaction}
           />
         </div>
 

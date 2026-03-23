@@ -8,17 +8,36 @@ server/node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime files
+*.pid
+*.seed
+*.pid.lock
 
 # Environment variables
 .env
 .env.*
 !.env.example
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 client/.env
 client/.env.*
 !client/.env.example
+client/.env.local
+client/.env.development.local
+client/.env.test.local
+client/.env.production.local
 server/.env
 server/.env.*
 !server/.env.example
+server/.env.local
+server/.env.development.local
+server/.env.test.local
+server/.env.production.local
 
 # Build output
 client/build/
@@ -30,6 +49,12 @@ server/dist/
 .cache/
 .next/
 coverage/
+tmp/
+temp/
+
+# Test output
+playwright-report/
+test-results/
 
 # Tooling cache
 .eslintcache

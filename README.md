@@ -1,127 +1,166 @@
 # QuantVista
 
-QuantVista is a full-stack real-time stock dashboard built with React, Node.js, Socket.IO, and MongoDB.
-It streams live market updates, provides historical chart ranges, and includes account-based price alerts.
+QuantVista is a full-stack real-time stock dashboard for Indian market symbols, built with React, Vite, Express, Socket.IO, and MongoDB.
 
-## Highlights
+It provides live price streaming, historical chart ranges, per-user alerts, watchlists with reusable alert presets, and a portfolio scaffold with transaction tracking and P&L summary.
 
-- Real-time stock updates over WebSocket (Socket.IO)
-- Historical range charting (current, 1D, 1W, 1M, 3M, 6M, 1Y, 5Y, all)
-- Authenticated user sessions (signup/login with JWT)
-- Per-user alert rules with trigger history
-- MongoDB-backed persistence with safe in-memory fallbacks when DB is unavailable
+## Key Features
+
+- Real-time stock updates over WebSocket with adaptive polling
+- Historical chart ranges: current, 1D, 1W, 1M, 3M, 6M, 1Y, 5Y, all
+- JWT-based authentication (signup, login, current user)
+- Alert engine with trigger history and cooldown support
+- Watchlists with:
+	- Create, rename, delete
+	- Add and remove symbols
+	- Alert preset templates per watchlist
+	- One-click apply preset to all symbols in a watchlist
+- Portfolio scaffold with:
+	- Buy and sell transactions
+	- Transaction history
+	- Position aggregation
+	- Realized and unrealized P&L summary
+- MongoDB persistence with in-memory fallback when DB is unavailable
 
 ## Tech Stack
 
-- Frontend: React, Vite, Tailwind CSS, Recharts, Socket.IO Client
+- Frontend: React, Vite, Tailwind CSS, Recharts, Socket.IO client
 - Backend: Node.js, Express, Socket.IO, Axios
 - Database: MongoDB with Mongoose
-- Auth: JWT + bcrypt
+- Authentication: JWT + bcrypt
 
 ## Project Structure
 
-```text
 .
-|-- client/
-|   |-- src/
+|-- client
+|   |-- src
+|   |   |-- components
+|   |   |-- App.jsx
+|   |   `-- main.jsx
 |   `-- package.json
-|-- server/
-|   |-- config/
-|   |-- models/
+|-- server
+|   |-- config
+|   |-- models
+|   |   |-- Alert.js
+|   |   |-- AlertHistory.js
+|   |   |-- PortfolioTransaction.js
+|   |   |-- Stock.js
+|   |   |-- StockLatest.js
+|   |   `-- User.js
 |   |-- index.js
 |   `-- package.json
 |-- package.json
 `-- README.md
-```
 
 ## Prerequisites
 
-- Node.js 18+
-- npm 9+
-- MongoDB (local or Atlas)
+- Node.js 18 or newer
+- npm 9 or newer
+- MongoDB local instance or Atlas cluster
 
-## Environment Variables
+## Environment Setup
 
-Create [server/.env](server/.env) with:
+Create a file at server/.env with:
 
-```env
 MONGODB_URI=mongodb://127.0.0.1:27017/quantvista
 JWT_SECRET=replace_with_a_long_random_secret
-```
 
-If `MONGODB_URI` is missing or invalid, the server starts in a live-only mode with in-memory fallbacks for persistence features.
+Notes:
+
+- If MONGODB_URI is missing or invalid, the server still starts in live-only mode.
+- In live-only mode, persistence-dependent features use in-memory storage for the session.
 
 ## Installation
 
-Install dependencies for root, server, and client:
+Run from repository root:
 
-```bash
 npm install
 npm install --prefix server
 npm install --prefix client
-```
 
-## Run in Development
+## Development Run
 
-From repository root:
+Run from repository root:
 
-```bash
 npm run dev
-```
 
 This starts:
 
-- Backend API + Socket server: `http://localhost:3001`
-- Frontend app (Vite): `http://localhost:5173`
+- Backend API and Socket server on http://localhost:3001
+- Frontend (Vite) on http://localhost:5173
 
-## API Overview
+## API Summary
 
-Auth:
+Authentication
 
-- `POST /api/auth/signup`
-- `POST /api/auth/login`
-- `GET /api/auth/me`
+- POST /api/auth/signup
+- POST /api/auth/login
+- GET /api/auth/me
 
-Stocks:
+Stocks
 
-- `GET /api/stocks`
-- `GET /api/stocks/:symbol/latest`
-- `GET /api/stocks/:symbol/history?range=1m&limit=900`
+- GET /api/stocks
+- GET /api/stocks/:symbol/latest
+- GET /api/stocks/:symbol/history?range=1m&limit=900
 
-Alerts:
+Alerts
 
-- `GET /api/alerts`
-- `POST /api/alerts`
-- `PUT /api/alerts/:id`
-- `DELETE /api/alerts/:id`
-- `GET /api/alerts/history?limit=50`
+- GET /api/alerts
+- POST /api/alerts
+- PUT /api/alerts/:id
+- DELETE /api/alerts/:id
+- GET /api/alerts/history?limit=50
 
-Health:
+Watchlists
 
-- `GET /api/health`
+- GET /api/watchlists
+- POST /api/watchlists
+- PUT /api/watchlists/:id
+- DELETE /api/watchlists/:id
+- POST /api/watchlists/:id/symbols
+- DELETE /api/watchlists/:id/symbols/:symbol
 
-## Real-Time Events
+Watchlist Presets
 
-Client emits:
+- POST /api/watchlists/:id/presets
+- PUT /api/watchlists/:id/presets/:presetId
+- DELETE /api/watchlists/:id/presets/:presetId
+- POST /api/watchlists/:id/presets/:presetId/apply
 
-- `subscribe` with stock symbol
-- `unsubscribe` with stock symbol
+Portfolio
 
-Server emits:
+- GET /api/portfolio/transactions
+- POST /api/portfolio/transactions
+- DELETE /api/portfolio/transactions/:id
+- GET /api/portfolio/summary
 
-- `stockUpdate`
-- `historicalData`
-- `alertTriggered`
-- `error`
+Health
+
+- GET /api/health
+
+## Real-Time Socket Events
+
+Client emits
+
+- subscribe (symbol)
+- unsubscribe (symbol)
+
+Server emits
+
+- stockUpdate
+- historicalData
+- alertTriggered
+- error
 
 ## Notes
 
-- Stock data is sourced from Yahoo Finance chart endpoints.
-- CORS is currently configured for local frontend and one deployed frontend domain in [server/index.js](server/index.js).
+- Market data is sourced from Yahoo Finance chart endpoints.
+- CORS currently allows local frontend and configured production domain.
+- Portfolio is a scaffold and can be extended with FIFO/LIFO cost basis modes, dividends, and taxes.
 
-## Roadmap Ideas
+## Suggested Next Enhancements
 
-- Watchlists and portfolio tracking
-- Multi-stock comparison views
-- Export chart/history data to CSV
-- Deploy-ready production scripts and Docker setup
+- Preset editing in the UI
+- Duplicate-safe preset apply mode
+- Portfolio analytics expansion (drawdown, allocation charts, benchmark comparison)
+- Export reports for alerts and portfolio snapshots

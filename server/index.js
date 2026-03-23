@@ -15,6 +15,7 @@ import StockLatest from "./models/StockLatest.js";
 import Alert from "./models/Alert.js";
 import AlertHistory from "./models/AlertHistory.js";
 import User from "./models/User.js";
+import PortfolioTransaction from "./models/PortfolioTransaction.js";
 
 const app = express();
 const server = createServer(app);
@@ -89,6 +90,117 @@ function requireAuth(req, res, next) {
   } catch (error) {
     return res.status(401).json({ error: "Invalid or expired auth token" });
   }
+}
+
+const DEFAULT_WATCHLIST_NAME = "Favorites";
+const ALERT_TYPES = [
+  "price_above",
+  "price_below",
+  "volatility",
+  "volume_spike",
+];
+
+function normalizeWatchlistName(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function buildWatchlistResponse(watchlist) {
+  return {
+    id: String(watchlist._id || watchlist.id),
+    name: watchlist.name,
+    symbols: Array.isArray(watchlist.symbols)
+      ? [...new Set(watchlist.symbols)]
+      : [],
+    createdAt: watchlist.createdAt || null,
+    updatedAt: watchlist.updatedAt || null,
+    alertPresets: Array.isArray(watchlist.alertPresets)
+      ? watchlist.alertPresets.map((preset) => ({
+          id: String(preset._id || preset.id),
+          name: preset.name,
+          type: preset.type,
+          threshold: Number(preset.threshold),
+          cooldownSeconds: Number(preset.cooldownSeconds || 90),
+          isActive: Boolean(
+            preset.isActive === undefined ? true : preset.isActive,
+          ),
+          createdAt: preset.createdAt || null,
+          updatedAt: preset.updatedAt || null,
+        }))
+      : [],
+  };
+}
+
+function buildWatchlistCollectionResponse(watchlists) {
+  return (Array.isArray(watchlists) ? watchlists : []).map(
+    buildWatchlistResponse,
+  );
+}
+
+function buildDefaultWatchlists() {
+  return [
+    {
+      name: DEFAULT_WATCHLIST_NAME,
+      symbols: [],
+      alertPresets: [],
+    },
+  ];
+}
+
+function normalizeAlertPresetName(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function normalizeAlertType(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function isValidAlertType(type) {
+  return ALERT_TYPES.includes(type);
+}
+
+function normalizeCooldownSeconds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 90;
+  }
+  return Math.max(15, Math.min(3600, Math.floor(numeric)));
+}
+
+function normalizePresetPayload(input) {
+  const name = normalizeAlertPresetName(input.name);
+  const type = normalizeAlertType(input.type);
+  const threshold = Number(input.threshold);
+  const cooldownSeconds = normalizeCooldownSeconds(input.cooldownSeconds);
+  const isActive =
+    input.isActive === undefined ? true : Boolean(input.isActive);
+
+  if (name.length < 2 || name.length > 60) {
+    return { error: "Preset name must be 2-60 characters" };
+  }
+
+  if (!isValidAlertType(type)) {
+    return { error: "Invalid alert type for preset" };
+  }
+
+  if (!Number.isFinite(threshold) || threshold < 0) {
+    return { error: "Preset threshold must be a valid non-negative number" };
+  }
+
+  return {
+    data: {
+      name,
+      type,
+      threshold,
+      cooldownSeconds,
+      isActive,
+    },
+  };
 }
 
 let isDbAvailable = false;
@@ -286,7 +398,11 @@ const inMemoryAlerts = [];
 const inMemoryAlertHistory = [];
 
 let memoryUserCounter = 1;
+let memoryWatchlistCounter = 1;
+let memoryAlertPresetCounter = 1;
+let memoryPortfolioTransactionCounter = 1;
 const inMemoryUsers = [];
+const inMemoryPortfolioTransactions = [];
 const socketUsers = new Map();
 
 let pollingMode = "idle";
@@ -921,7 +1037,12 @@ app.post("/api/auth/signup", async (req, res) => {
       }
 
       const passwordHash = await bcrypt.hash(password, 12);
-      const createdUser = await new User({ name, email, passwordHash }).save();
+      const createdUser = await new User({
+        name,
+        email,
+        passwordHash,
+        watchlists: buildDefaultWatchlists(),
+      }).save();
       const token = signAuthToken(createdUser);
 
       return res.status(201).json({
@@ -943,6 +1064,16 @@ app.post("/api/auth/signup", async (req, res) => {
       name,
       email,
       passwordHash,
+      watchlists: [
+        {
+          id: `mem-w-${memoryWatchlistCounter++}`,
+          name: DEFAULT_WATCHLIST_NAME,
+          symbols: [],
+          alertPresets: [],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ],
       createdAt: new Date(),
     };
     inMemoryUsers.push(createdUser);
@@ -1025,6 +1156,814 @@ app.get("/api/stocks", (req, res) => {
   res.json(
     Object.entries(STOCK_SYMBOLS).map(([symbol, name]) => ({ symbol, name })),
   );
+});
+
+app.get("/api/watchlists", requireAuth, async (req, res) => {
+  try {
+    if (isDbAvailable) {
+      const user = await User.findById(req.user.id).select("watchlists");
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      return res.json(buildWatchlistCollectionResponse(user.watchlists));
+    }
+
+    const user = inMemoryUsers.find((entry) => entry.id === req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    return res.json(buildWatchlistCollectionResponse(user.watchlists));
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/watchlists", requireAuth, async (req, res) => {
+  try {
+    const normalizedName = normalizeWatchlistName(req.body.name);
+    if (normalizedName.length < 2 || normalizedName.length > 40) {
+      return res
+        .status(400)
+        .json({ error: "Watchlist name must be 2-40 characters" });
+    }
+
+    if (isDbAvailable) {
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      user.watchlists.push({ name: normalizedName, symbols: [] });
+      await user.save();
+
+      const created = user.watchlists[user.watchlists.length - 1];
+      return res.status(201).json(buildWatchlistResponse(created));
+    }
+
+    const user = inMemoryUsers.find((entry) => entry.id === req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (!Array.isArray(user.watchlists)) {
+      user.watchlists = [];
+    }
+
+    const created = {
+      id: `mem-w-${memoryWatchlistCounter++}`,
+      name: normalizedName,
+      symbols: [],
+      alertPresets: [],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    user.watchlists.unshift(created);
+    return res.status(201).json(buildWatchlistResponse(created));
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.put("/api/watchlists/:id", requireAuth, async (req, res) => {
+  try {
+    const normalizedName = normalizeWatchlistName(req.body.name);
+    if (normalizedName.length < 2 || normalizedName.length > 40) {
+      return res
+        .status(400)
+        .json({ error: "Watchlist name must be 2-40 characters" });
+    }
+
+    const { id } = req.params;
+
+    if (isDbAvailable) {
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const target = user.watchlists.id(id);
+      if (!target) {
+        return res.status(404).json({ error: "Watchlist not found" });
+      }
+
+      target.name = normalizedName;
+      await user.save();
+      return res.json(buildWatchlistResponse(target));
+    }
+
+    const user = inMemoryUsers.find((entry) => entry.id === req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const target = (user.watchlists || []).find((entry) => entry.id === id);
+    if (!target) {
+      return res.status(404).json({ error: "Watchlist not found" });
+    }
+
+    target.name = normalizedName;
+    target.updatedAt = new Date();
+    return res.json(buildWatchlistResponse(target));
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/watchlists/:id", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (isDbAvailable) {
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const nextWatchlists = user.watchlists.filter(
+        (watchlist) => String(watchlist._id) !== id,
+      );
+
+      if (nextWatchlists.length === user.watchlists.length) {
+        return res.status(404).json({ error: "Watchlist not found" });
+      }
+
+      user.watchlists = nextWatchlists;
+      await user.save();
+      return res.json({ success: true });
+    }
+
+    const user = inMemoryUsers.find((entry) => entry.id === req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const prevLength = (user.watchlists || []).length;
+    user.watchlists = (user.watchlists || []).filter(
+      (entry) => entry.id !== id,
+    );
+
+    if (user.watchlists.length === prevLength) {
+      return res.status(404).json({ error: "Watchlist not found" });
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/watchlists/:id/symbols", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const symbol = String(req.body.symbol || "")
+      .trim()
+      .toUpperCase();
+
+    if (!isValidStockSymbol(symbol)) {
+      return res.status(400).json({ error: "Unsupported stock symbol" });
+    }
+
+    if (isDbAvailable) {
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const target = user.watchlists.id(id);
+      if (!target) {
+        return res.status(404).json({ error: "Watchlist not found" });
+      }
+
+      if (!target.symbols.includes(symbol)) {
+        target.symbols.push(symbol);
+      }
+
+      await user.save();
+      return res.json(buildWatchlistResponse(target));
+    }
+
+    const user = inMemoryUsers.find((entry) => entry.id === req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const target = (user.watchlists || []).find((entry) => entry.id === id);
+    if (!target) {
+      return res.status(404).json({ error: "Watchlist not found" });
+    }
+
+    if (!Array.isArray(target.symbols)) {
+      target.symbols = [];
+    }
+
+    if (!target.symbols.includes(symbol)) {
+      target.symbols.push(symbol);
+      target.updatedAt = new Date();
+    }
+
+    return res.json(buildWatchlistResponse(target));
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete(
+  "/api/watchlists/:id/symbols/:symbol",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const symbol = String(req.params.symbol || "")
+        .trim()
+        .toUpperCase();
+
+      if (!isValidStockSymbol(symbol)) {
+        return res.status(400).json({ error: "Unsupported stock symbol" });
+      }
+
+      if (isDbAvailable) {
+        const user = await User.findById(req.user.id);
+        if (!user) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        const target = user.watchlists.id(id);
+        if (!target) {
+          return res.status(404).json({ error: "Watchlist not found" });
+        }
+
+        target.symbols = (target.symbols || []).filter(
+          (item) => item !== symbol,
+        );
+        await user.save();
+        return res.json(buildWatchlistResponse(target));
+      }
+
+      const user = inMemoryUsers.find((entry) => entry.id === req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const target = (user.watchlists || []).find((entry) => entry.id === id);
+      if (!target) {
+        return res.status(404).json({ error: "Watchlist not found" });
+      }
+
+      target.symbols = (target.symbols || []).filter((item) => item !== symbol);
+      target.updatedAt = new Date();
+      return res.json(buildWatchlistResponse(target));
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
+  },
+);
+
+app.post("/api/watchlists/:id/presets", requireAuth, async (req, res) => {
+  try {
+    const normalized = normalizePresetPayload(req.body || {});
+    if (normalized.error) {
+      return res.status(400).json({ error: normalized.error });
+    }
+
+    const { id } = req.params;
+
+    if (isDbAvailable) {
+      const user = await User.findById(req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const target = user.watchlists.id(id);
+      if (!target) {
+        return res.status(404).json({ error: "Watchlist not found" });
+      }
+
+      target.alertPresets.push(normalized.data);
+      await user.save();
+      return res.status(201).json(buildWatchlistResponse(target));
+    }
+
+    const user = inMemoryUsers.find((entry) => entry.id === req.user.id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const target = (user.watchlists || []).find((entry) => entry.id === id);
+    if (!target) {
+      return res.status(404).json({ error: "Watchlist not found" });
+    }
+
+    if (!Array.isArray(target.alertPresets)) {
+      target.alertPresets = [];
+    }
+
+    target.alertPresets.push({
+      id: `mem-p-${memoryAlertPresetCounter++}`,
+      ...normalized.data,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    target.updatedAt = new Date();
+
+    return res.status(201).json(buildWatchlistResponse(target));
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.put(
+  "/api/watchlists/:id/presets/:presetId",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const normalized = normalizePresetPayload(req.body || {});
+      if (normalized.error) {
+        return res.status(400).json({ error: normalized.error });
+      }
+
+      const { id, presetId } = req.params;
+
+      if (isDbAvailable) {
+        const user = await User.findById(req.user.id);
+        if (!user) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        const target = user.watchlists.id(id);
+        if (!target) {
+          return res.status(404).json({ error: "Watchlist not found" });
+        }
+
+        const preset = target.alertPresets.id(presetId);
+        if (!preset) {
+          return res.status(404).json({ error: "Preset not found" });
+        }
+
+        Object.assign(preset, normalized.data);
+        await user.save();
+        return res.json(buildWatchlistResponse(target));
+      }
+
+      const user = inMemoryUsers.find((entry) => entry.id === req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const target = (user.watchlists || []).find((entry) => entry.id === id);
+      if (!target) {
+        return res.status(404).json({ error: "Watchlist not found" });
+      }
+
+      const preset = (target.alertPresets || []).find(
+        (entry) => entry.id === presetId,
+      );
+      if (!preset) {
+        return res.status(404).json({ error: "Preset not found" });
+      }
+
+      Object.assign(preset, normalized.data, { updatedAt: new Date() });
+      target.updatedAt = new Date();
+      return res.json(buildWatchlistResponse(target));
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
+  },
+);
+
+app.delete(
+  "/api/watchlists/:id/presets/:presetId",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const { id, presetId } = req.params;
+
+      if (isDbAvailable) {
+        const user = await User.findById(req.user.id);
+        if (!user) {
+          return res.status(404).json({ error: "User not found" });
+        }
+
+        const target = user.watchlists.id(id);
+        if (!target) {
+          return res.status(404).json({ error: "Watchlist not found" });
+        }
+
+        const nextPresets = (target.alertPresets || []).filter(
+          (entry) => String(entry._id) !== presetId,
+        );
+
+        if (nextPresets.length === (target.alertPresets || []).length) {
+          return res.status(404).json({ error: "Preset not found" });
+        }
+
+        target.alertPresets = nextPresets;
+        await user.save();
+        return res.json(buildWatchlistResponse(target));
+      }
+
+      const user = inMemoryUsers.find((entry) => entry.id === req.user.id);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const target = (user.watchlists || []).find((entry) => entry.id === id);
+      if (!target) {
+        return res.status(404).json({ error: "Watchlist not found" });
+      }
+
+      const prevLength = (target.alertPresets || []).length;
+      target.alertPresets = (target.alertPresets || []).filter(
+        (entry) => entry.id !== presetId,
+      );
+
+      if (target.alertPresets.length === prevLength) {
+        return res.status(404).json({ error: "Preset not found" });
+      }
+
+      target.updatedAt = new Date();
+      return res.json(buildWatchlistResponse(target));
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
+  },
+);
+
+app.post(
+  "/api/watchlists/:id/presets/:presetId/apply",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const { id, presetId } = req.params;
+
+      let watchlist = null;
+      let preset = null;
+
+      if (isDbAvailable) {
+        const user = await User.findById(req.user.id);
+        if (!user) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        watchlist = user.watchlists.id(id);
+        if (!watchlist) {
+          return res.status(404).json({ error: "Watchlist not found" });
+        }
+        preset = watchlist.alertPresets.id(presetId);
+      } else {
+        const user = inMemoryUsers.find((entry) => entry.id === req.user.id);
+        if (!user) {
+          return res.status(404).json({ error: "User not found" });
+        }
+        watchlist = (user.watchlists || []).find((entry) => entry.id === id);
+        if (!watchlist) {
+          return res.status(404).json({ error: "Watchlist not found" });
+        }
+        preset = (watchlist.alertPresets || []).find(
+          (entry) => entry.id === presetId,
+        );
+      }
+
+      if (!preset) {
+        return res.status(404).json({ error: "Preset not found" });
+      }
+
+      const symbols = Array.isArray(watchlist.symbols)
+        ? [...new Set(watchlist.symbols)].filter((symbol) =>
+            isValidStockSymbol(symbol),
+          )
+        : [];
+
+      if (!symbols.length) {
+        return res.status(400).json({ error: "Watchlist has no symbols" });
+      }
+
+      const payloads = symbols.map((symbol) => ({
+        ownerUserId: req.user.id,
+        symbol,
+        name: STOCK_SYMBOLS[symbol],
+        type: preset.type,
+        threshold: Number(preset.threshold),
+        cooldownSeconds: normalizeCooldownSeconds(preset.cooldownSeconds),
+        isActive: Boolean(preset.isActive),
+        lastTriggeredAt: null,
+      }));
+
+      if (isDbAvailable) {
+        const created = await Alert.insertMany(payloads, { ordered: false });
+        return res.status(201).json({
+          createdCount: created.length,
+          symbols: created.map((item) => item.symbol),
+        });
+      }
+
+      const created = payloads.map((payload) => ({
+        _id: `mem-a-${memoryAlertCounter++}`,
+        ...payload,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }));
+      inMemoryAlerts.unshift(...created);
+
+      return res.status(201).json({
+        createdCount: created.length,
+        symbols: created.map((item) => item.symbol),
+      });
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
+  },
+);
+
+function buildPortfolioSummaryFromTransactions(
+  transactions,
+  latestPriceBySymbol,
+) {
+  const sorted = [...transactions].sort(
+    (a, b) => new Date(a.tradedAt) - new Date(b.tradedAt),
+  );
+  const positions = new Map();
+
+  for (const txn of sorted) {
+    const symbol = txn.symbol;
+    if (!positions.has(symbol)) {
+      positions.set(symbol, {
+        symbol,
+        name: STOCK_SYMBOLS[symbol] || symbol,
+        quantity: 0,
+        avgCost: 0,
+        invested: 0,
+        realizedPnl: 0,
+      });
+    }
+
+    const pos = positions.get(symbol);
+    const qty = Number(txn.quantity) || 0;
+    const price = Number(txn.price) || 0;
+    const fee = Number(txn.fee) || 0;
+
+    if (txn.side === "buy") {
+      const tradeValue = qty * price + fee;
+      const nextQty = pos.quantity + qty;
+      const totalCost = pos.avgCost * pos.quantity + tradeValue;
+
+      pos.quantity = nextQty;
+      pos.avgCost = nextQty > 0 ? totalCost / nextQty : 0;
+      pos.invested += tradeValue;
+      continue;
+    }
+
+    if (qty <= 0 || pos.quantity <= 0) {
+      continue;
+    }
+
+    const executedQty = Math.min(qty, pos.quantity);
+    const proceeds = executedQty * price - fee;
+    const costBasis = executedQty * pos.avgCost;
+
+    pos.realizedPnl += proceeds - costBasis;
+    pos.quantity -= executedQty;
+    pos.invested -= costBasis;
+
+    if (pos.quantity <= 0.0000001) {
+      pos.quantity = 0;
+      pos.avgCost = 0;
+      pos.invested = 0;
+    }
+  }
+
+  const summaryPositions = [];
+  let totalMarketValue = 0;
+  let totalUnrealizedPnl = 0;
+  let totalRealizedPnl = 0;
+
+  for (const pos of positions.values()) {
+    totalRealizedPnl += pos.realizedPnl;
+    if (pos.quantity <= 0) {
+      continue;
+    }
+
+    const latestPrice = Number(latestPriceBySymbol[pos.symbol]);
+    const marketValue = Number.isFinite(latestPrice)
+      ? latestPrice * pos.quantity
+      : null;
+    const unrealizedPnl =
+      marketValue == null ? null : marketValue - pos.avgCost * pos.quantity;
+
+    if (marketValue != null) {
+      totalMarketValue += marketValue;
+    }
+    if (unrealizedPnl != null) {
+      totalUnrealizedPnl += unrealizedPnl;
+    }
+
+    summaryPositions.push({
+      symbol: pos.symbol,
+      name: pos.name,
+      quantity: Number(pos.quantity.toFixed(6)),
+      avgCost: Number(pos.avgCost.toFixed(4)),
+      latestPrice: Number.isFinite(latestPrice)
+        ? Number(latestPrice.toFixed(4))
+        : null,
+      marketValue: marketValue == null ? null : Number(marketValue.toFixed(2)),
+      unrealizedPnl:
+        unrealizedPnl == null ? null : Number(unrealizedPnl.toFixed(2)),
+      realizedPnl: Number(pos.realizedPnl.toFixed(2)),
+    });
+  }
+
+  summaryPositions.sort((a, b) => (b.marketValue || 0) - (a.marketValue || 0));
+
+  return {
+    totals: {
+      marketValue: Number(totalMarketValue.toFixed(2)),
+      unrealizedPnl: Number(totalUnrealizedPnl.toFixed(2)),
+      realizedPnl: Number(totalRealizedPnl.toFixed(2)),
+      positions: summaryPositions.length,
+      transactions: transactions.length,
+    },
+    positions: summaryPositions,
+  };
+}
+
+async function getLatestPricesBySymbol(symbols) {
+  if (!symbols.length) {
+    return {};
+  }
+
+  if (!isDbAvailable) {
+    return {};
+  }
+
+  const rows = await StockLatest.find({ symbol: { $in: symbols } })
+    .select("symbol price")
+    .lean();
+
+  return rows.reduce((acc, row) => {
+    const price = Number(row.price);
+    if (Number.isFinite(price)) {
+      acc[row.symbol] = price;
+    }
+    return acc;
+  }, {});
+}
+
+app.get("/api/portfolio/transactions", requireAuth, async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit || 200)));
+
+    if (isDbAvailable) {
+      const rows = await PortfolioTransaction.find({ ownerUserId: req.user.id })
+        .sort({ tradedAt: -1, createdAt: -1 })
+        .limit(limit)
+        .lean();
+      return res.json(rows);
+    }
+
+    const rows = inMemoryPortfolioTransactions
+      .filter((entry) => entry.ownerUserId === req.user.id)
+      .slice()
+      .sort((a, b) => new Date(b.tradedAt) - new Date(a.tradedAt))
+      .slice(0, limit);
+
+    return res.json(rows);
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/portfolio/transactions", requireAuth, async (req, res) => {
+  try {
+    const symbol = String(req.body.symbol || "")
+      .trim()
+      .toUpperCase();
+    const side = String(req.body.side || "")
+      .trim()
+      .toLowerCase();
+    const quantity = Number(req.body.quantity);
+    const price = Number(req.body.price);
+    const fee = Number(req.body.fee || 0);
+    const notes = String(req.body.notes || "")
+      .trim()
+      .slice(0, 280);
+    const tradedAt = req.body.tradedAt
+      ? new Date(req.body.tradedAt)
+      : new Date();
+
+    if (!isValidStockSymbol(symbol)) {
+      return res.status(400).json({ error: "Unsupported stock symbol" });
+    }
+    if (!["buy", "sell"].includes(side)) {
+      return res
+        .status(400)
+        .json({ error: "Transaction side must be buy or sell" });
+    }
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return res
+        .status(400)
+        .json({ error: "Quantity must be a positive number" });
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      return res
+        .status(400)
+        .json({ error: "Price must be a non-negative number" });
+    }
+    if (!Number.isFinite(fee) || fee < 0) {
+      return res
+        .status(400)
+        .json({ error: "Fee must be a non-negative number" });
+    }
+    if (Number.isNaN(tradedAt.valueOf())) {
+      return res.status(400).json({ error: "Invalid tradedAt timestamp" });
+    }
+
+    const payload = {
+      ownerUserId: req.user.id,
+      symbol,
+      side,
+      quantity,
+      price,
+      fee,
+      notes,
+      tradedAt,
+    };
+
+    if (isDbAvailable) {
+      const created = await new PortfolioTransaction(payload).save();
+      return res.status(201).json(created);
+    }
+
+    const created = {
+      _id: `mem-t-${memoryPortfolioTransactionCounter++}`,
+      ...payload,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    inMemoryPortfolioTransactions.unshift(created);
+    return res.status(201).json(created);
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/portfolio/transactions/:id", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (isDbAvailable) {
+      const deleted = await PortfolioTransaction.findOneAndDelete({
+        _id: id,
+        ownerUserId: req.user.id,
+      });
+      if (!deleted) {
+        return res.status(404).json({ error: "Transaction not found" });
+      }
+      return res.json({ success: true });
+    }
+
+    const index = inMemoryPortfolioTransactions.findIndex(
+      (entry) => entry._id === id && entry.ownerUserId === req.user.id,
+    );
+    if (index === -1) {
+      return res.status(404).json({ error: "Transaction not found" });
+    }
+
+    inMemoryPortfolioTransactions.splice(index, 1);
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/portfolio/summary", requireAuth, async (req, res) => {
+  try {
+    let transactions = [];
+
+    if (isDbAvailable) {
+      transactions = await PortfolioTransaction.find({
+        ownerUserId: req.user.id,
+      })
+        .sort({ tradedAt: 1, createdAt: 1 })
+        .lean();
+    } else {
+      transactions = inMemoryPortfolioTransactions
+        .filter((entry) => entry.ownerUserId === req.user.id)
+        .slice()
+        .sort((a, b) => new Date(a.tradedAt) - new Date(b.tradedAt));
+    }
+
+    const symbols = [...new Set(transactions.map((entry) => entry.symbol))];
+    const latestPriceBySymbol = await getLatestPricesBySymbol(symbols);
+    const summary = buildPortfolioSummaryFromTransactions(
+      transactions,
+      latestPriceBySymbol,
+    );
+
+    return res.json(summary);
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
 });
 
 app.get("/api/stocks/:symbol/latest", async (req, res) => {
