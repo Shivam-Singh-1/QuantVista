@@ -1,0 +1,10 @@
+{
+  "name": "quantvista",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "concurrently \"npm run start --prefix server\" \"npm run dev --prefix client\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

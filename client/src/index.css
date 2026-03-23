@@ -1,0 +1,122 @@
+@import url("https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Manrope:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f6f1e7;
+  --bg-secondary: #efe6d7;
+  --card: rgba(255, 251, 245, 0.78);
+  --card-strong: #fff9ef;
+  --border: #d9cbb5;
+  --text: #211f1c;
+  --text-muted: #665d4f;
+  --accent: #0b79d0;
+  --accent-soft: rgba(11, 121, 208, 0.14);
+  --gain: #0a9f64;
+  --loss: #d0503f;
+  --grid: #d8cab5;
+  --ring: rgba(11, 121, 208, 0.4);
+  --shadow: 0 24px 45px rgba(68, 51, 27, 0.12);
+}
+
+.dark {
+  --bg: #121211;
+  --bg-secondary: #191917;
+  --card: rgba(31, 31, 29, 0.82);
+  --card-strong: #262624;
+  --border: #383833;
+  --text: #f5f1e8;
+  --text-muted: #b8b2a6;
+  --accent: #55b7ff;
+  --accent-soft: rgba(85, 183, 255, 0.2);
+  --gain: #36d38a;
+  --loss: #ff7c6a;
+  --grid: #31312d;
+  --ring: rgba(85, 183, 255, 0.32);
+  --shadow: 0 30px 60px rgba(0, 0, 0, 0.35);
+}
+
+* {
+  border-color: var(--border);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  font-family: "Manrope", sans-serif;
+  background:
+    radial-gradient(
+      circle at 10% 10%,
+      rgba(22, 133, 255, 0.12),
+      transparent 36%
+    ),
+    radial-gradient(
+      circle at 90% 15%,
+      rgba(30, 205, 144, 0.12),
+      transparent 35%
+    ),
+    linear-gradient(130deg, var(--bg), var(--bg-secondary));
+}
+
+h1,
+h2,
+h3 {
+  font-family: "Fraunces", serif;
+  letter-spacing: 0.01em;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.grain-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.18;
+  background-image: radial-gradient(
+    rgba(0, 0, 0, 0.08) 0.6px,
+    transparent 0.6px
+  );
+  background-size: 4px 4px;
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in-up {
+  animation: fade-in-up 0.45s ease both;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04) 0%,
+    rgba(255, 255, 255, 0.22) 50%,
+    rgba(255, 255, 255, 0.04) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.35s linear infinite;
+}
